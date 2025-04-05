@@ -90,18 +90,19 @@ public:
         vector<double> v;
         plaintext.store(v);
 
-        std::string result;
+        std::string result = "";
         for (long i = 0; i < v.size(); ++i) {
-            result += static_cast<char>(v[i]);
+            result += static_cast<char>(round(v[i]));
         }
         return result;
     }
 
-    bool isEqualEncrypted(User& user, const helib::Ctxt& ctx1, const helib::Ctxt& ctx2){
-        auto res = decryptDouble(user, encryptedDoubleEquality(ctx1, 
-        ctx2, user.publicKey));
-        cout << res << " res \n";
-        return res <= 0;
+    bool isEqualDoubleEncrypted(User& user, const helib::Ctxt& ctx1, const helib::Ctxt& ctx2){
+        return encryptedDoubleEquality(ctx1, ctx2, user);
+    }
+
+    bool isEqualStringEncrypted(User& user, const helib::Ctxt& ctx1, const helib::Ctxt& ctx2){
+        return decryptString(user, ctx1) == decryptString(user, ctx2);
     }
     
     void addTransaction(User& user, const Transaction& transaction) {
@@ -144,21 +145,47 @@ public:
         addTransaction(user, transaction);
     }
 
-    std::vector<Transaction> searchTransactions( User& user, const std::string& bankName, std::chrono::system_clock::time_point startDate, std::chrono::system_clock::time_point endDate) {
+    std::vector<Transaction> searchTransactionsByBank( User& user, 
+        const std::string& bankName) {
         std::vector<Transaction> results;
 
         auto encryptedBank = encryptString(user, bankName);
       
         for (const auto& transaction : user.transactions) {
-            //cout << decryptString(user, transaction.encryptedBankName) << "\n";
-            
-            bool isEqualBank = isEqualEncrypted(user, transaction.encryptedBankName,encryptedBank);
+            bool isEqualBank = isEqualStringEncrypted(user, transaction.encryptedBankName,encryptedBank);
+                        
+            if (isEqualBank) {
+                results.push_back(transaction);
+            }
+        }
+        return results;
+    }
+
+    std::vector<Transaction> searchTransactionsByDates( User& user,
+        std::chrono::system_clock::time_point startDate, 
+        std::chrono::system_clock::time_point endDate) {
+        std::vector<Transaction> results;
+      
+        for (const auto& transaction : user.transactions) {
             std::time_t decryptedTime = std::stoll(decryptString(user, transaction.encryptedDate));
             std::chrono::system_clock::time_point transactionDate = std::chrono::system_clock::from_time_t(decryptedTime);
-            
-            //std::cout << std::put_time(std::localtime(&decryptedTime), "%Y-%m-%d %H:%M:%S") << "\n";
-            
-            if (isEqualBank && transactionDate >= startDate && transactionDate <= endDate) {
+                        
+            if (transactionDate >= startDate && transactionDate <= endDate) {
+                results.push_back(transaction);
+            }
+        }
+        return results;
+    }
+
+    std::vector<Transaction> searchTransactionsByValue( User& user, const double& value) {
+        std::vector<Transaction> results;
+
+        auto encryptedValue = encryptDouble(user, value);
+      
+        for (const auto& transaction : user.transactions) {
+            bool isEqualValue = isEqualDoubleEncrypted(user, transaction.encryptedAmount, encryptedValue);
+
+            if (isEqualValue) {
                 results.push_back(transaction);
             }
         }
@@ -180,6 +207,7 @@ private:
                                 bootstrapThreshold_(bootstrapThreshold) {}
     helib::Context context_;
     int bootstrapThreshold_;
+    double equality_threshold_ = 0.00001;
 
     helib::Ctxt encrypt(const User& user, const vector<double> value) {
         long n = context_.getNSlots();
@@ -220,59 +248,15 @@ private:
     }
 
     // Function to compare two encrypted doubles for equality
-    helib::Ctxt encryptedDoubleEquality(const helib::Ctxt& ctx1, const helib::Ctxt& ctx2, 
-                    const helib::PubKey& publicKey) {
+    bool encryptedDoubleEquality(const helib::Ctxt& ctx1, const helib::Ctxt& ctx2, 
+                    const User& user) {
         // Subtract the two encrypted values
         helib::Ctxt difference = ctx1;
         difference -= ctx2;
 
-        // Encrypt 0
-        std::vector<double> zero_ptxt(context_.getNSlots(), 0.0);
-        helib::PtxtArray zero_ptxt_array(context_, zero_ptxt);
-        helib::Ctxt encrypted_zero(publicKey);
-        zero_ptxt_array.encrypt(encrypted_zero);
+        double res = decryptDouble(user, difference);
 
-        // Encrypt 1
-        std::vector<double> one_ptxt(context_.getNSlots(), 1.0);
-        helib::PtxtArray one_ptxt_array(context_, one_ptxt);
-        helib::Ctxt encrypted_one(publicKey);
-        one_ptxt_array.encrypt(encrypted_one);
-
-        // Compute the absolute value of the difference (approximate)
-        difference.square(); // Square to approximate absolute value
-        //difference.sqrt(); // Square root to get back to original scale (approximate)
-
-        // Compare the squared difference with a small threshold (e.g., 1e-6)
-        double threshold = 1e-6;
-        std::vector<double> threshold_ptxt(context_.getNSlots(), threshold);
-        helib::PtxtArray threshold_ptxt_array(context_, threshold_ptxt);
-        helib::Ctxt encrypted_threshold(publicKey);
-        threshold_ptxt_array.encrypt(encrypted_threshold);
-
-        // Compute the difference between the squared difference and the threshold
-        helib::Ctxt comparison = difference;
-        comparison -= encrypted_threshold;
-
-        // If the difference is negative or close to zero, it means the values are equal.
-        // If the difference is positive, it means the values are not equal.
-
-        //If the difference is small, then return 1, else return 0.
-        //This is a polynomial approximation of a boolean function.
-
-        //TODO: FIX APPROXIMATION TO CLOSE TO ZERO
-        helib::Ctxt result = encrypted_one; // Default: not equal
-        comparison.negate(); 
-        comparison += 1.0;
-        comparison.square();
-        comparison -= 1.0;
-        comparison.negate();
-
-        cout << "c.capacity=" << comparison.capacity() << " ";
-        cout << "c.errorBound=" << comparison.errorBound() << "\n";
-        
-        result.multiplyBy(comparison);
-        result += encrypted_zero;
-        return result;
+        return (abs(res) <= equality_threshold_);
     }
 
     void bootstrap(User& user, helib::Ctxt ciphertext) {
@@ -290,7 +274,7 @@ int main() {
     helib::SecKey secKey = api->generateSecurityKey();
     helib::PubKey pk= api->generatePublicKey(secKey);
     User user(pk, secKey);
-    
+
     Bank bank1 = {"Bank of Example"};
     api->registerBank(user, bank1);
 
@@ -299,16 +283,16 @@ int main() {
   
     api->deposit(user, "Bank of Example", now, 100.0);  
     api->withdraw(user, "Bank of Example", now, 50.0);
-    api->savings(user, "Bank of Example", now, 50.0, 0.05);
+    api->savings(user, "Bank of Test", now, 50.0, 0.05);
     
     api->deposit(user, "Bank of Example", now, 25.0);
     api->withdraw(user, "Bank of Example", now, 10.0);
-    api->deposit(user, "Bank of Crazy", now, 10.0);
+    api->deposit(user, "Bank of Test", now, 10.0);
 
-    const std::string& query = "Bank of Crazy";
-    auto transactions = api->searchTransactions(user,query, yesterday, now);
+    const std::string& query = "Bank of Test";
+    auto transactions = api->searchTransactionsByBank(user,query);
 
-    std::cout << "Transactions:\n";
+    std::cout << "Transactions by Bank:\n";
     for (const auto& transaction : transactions) {
         std::string decryptedBank = api->decryptString(user, transaction.encryptedBankName);
         std::time_t decryptedTime = std::stoll(api->decryptString(user, transaction.encryptedDate));
@@ -316,7 +300,7 @@ int main() {
         double decryptedAmount = api->decryptDouble(user, transaction.encryptedAmount);
 
         std::time_t t = std::chrono::system_clock::to_time_t(transactionDate);
-        std::cout << "  " << std::put_time(std::localtime(&t), "%Y-%m-%d %H:%M:%S") << " - " << transaction.type << ": " << decryptedAmount << "\n";
+        std::cout << decryptedBank << " " << std::put_time(std::localtime(&t), "%Y-%m-%d %H:%M:%S") << " - " << transaction.type << ": " << decryptedAmount << "\n";
     }
 
     std::cout << "Total Balance: " << api->decryptDouble(user,api->getTotalBalance(user)) << "\n";
