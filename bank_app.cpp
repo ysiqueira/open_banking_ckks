@@ -106,8 +106,13 @@ public:
     }
     
     void addTransaction(User& user, const Transaction& transaction) {
-        user.transactions.push_back(transaction);
-        bootstrap(user,transaction.encryptedAmount);
+        auto encryptedAmount = bootstrap(user,transaction.encryptedAmount);
+        user.transactions.push_back({
+            transaction.encryptedBankName, 
+            transaction.encryptedDate,
+            encryptedAmount, 
+            transaction.type });
+         
 
     }
 
@@ -199,6 +204,18 @@ public:
         }
         return totalBalance;
     }
+
+    helib::Ctxt encryptDouble(const User& user, const double value) {
+        return encrypt(user, {value});
+    }
+
+    helib::Ctxt encryptString(const User& user, const std::string& value) {
+        vector<double> v0(value.size());
+        for (size_t i = 0; i < value.size(); ++i) {
+            v0[i] = static_cast<double>(value[i]);
+        }
+        return encrypt(user, v0);
+    }
     
 private:
     explicit OpenBankingAPI(int bootstrapThreshold) : context_(helib::ContextBuilder<helib::CKKS>()
@@ -221,18 +238,6 @@ private:
         helib::Ctxt c0(user.publicKey);
         p0.encrypt(c0);
         return c0;
-    }
-
-    helib::Ctxt encryptDouble(const User& user, const double value) {
-        return encrypt(user, {value});
-    }
-
-    helib::Ctxt encryptString(const User& user, const std::string& value) {
-        vector<double> v0(value.size());
-        for (size_t i = 0; i < value.size(); ++i) {
-            v0[i] = static_cast<double>(value[i]);
-        }
-        return encrypt(user, v0);
     }
 
     helib::Ctxt add(const helib::Ctxt& ctxt1, const helib::Ctxt& ctxt2) {
@@ -259,16 +264,18 @@ private:
         return (abs(res) <= equality_threshold_);
     }
 
-    void bootstrap(User& user, helib::Ctxt ciphertext) {
+    helib::Ctxt bootstrap(User& user, helib::Ctxt ciphertext) {
         if(ciphertext.capacity() < bootstrapThreshold_){
             cout << "Please Bootstrap!\n";
+            auto dec = decryptDouble(user,ciphertext);
+            return encryptDouble(user, dec);
         }
+        return ciphertext;
     }
 
 };
 
-int main() {
-    
+void testFunctionalities(){
     auto api = OpenBankingAPI::Create();
         
     helib::SecKey secKey = api->generateSecurityKey();
@@ -304,6 +311,174 @@ int main() {
     }
 
     std::cout << "Total Balance: " << api->decryptDouble(user,api->getTotalBalance(user)) << "\n";
+}
+
+void testLatency(){
+    auto api = OpenBankingAPI::Create();
+        
+    helib::SecKey secKey = api->generateSecurityKey();
+    helib::PubKey pk= api->generatePublicKey(secKey);
+    User user(pk, secKey);
+    Bank bank1 = {"Bank of Example"};
+    Bank bank2 = {"Bank of Test"};
+    api->registerBank(user, bank1);
+    api->registerBank(user, bank2);
+
+    auto now = std::chrono::system_clock::now();
+
+    double avg_encryption = 0;
+    for(int i = 0;i<5;i++){
+        //Encryption of simple transactions
+        // Measure the start time
+        auto start = std::chrono::high_resolution_clock::now();
+        api->deposit(user, "Bank of Example", now, 100.0);  
+        // Measure the end time
+        auto end = std::chrono::high_resolution_clock::now();
+        // Calculate the duration
+        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+        avg_encryption += duration.count();
+    }
+
+    cout << "enc\n";
+
+
+    //Encryption of transactions mult
+    double avg_encryption_mult = 0;
+    for(int i = 0;i<5;i++){
+        //Encryption of multiplication transactions
+        // Measure the start time
+        auto start = std::chrono::high_resolution_clock::now();
+        api->savings(user, "Bank of Test", now, 100.0, 0.35);  
+        // Measure the end time
+        auto end = std::chrono::high_resolution_clock::now();
+        // Calculate the duration
+        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+        avg_encryption_mult += duration.count();
+    }
+    cout << "mult\n";
+    
+    //Search by bank name
+    double avg_search_bank = 0;
+    for(int i = 0;i<5;i++){
+        // Measure the start time
+        auto start = std::chrono::high_resolution_clock::now();
+        const std::string& query = "Bank of Test";
+        auto transactions = api->searchTransactionsByBank(user,query);
+        // Measure the end time
+        auto end = std::chrono::high_resolution_clock::now();
+        // Calculate the duration
+        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+        avg_search_bank += duration.count();
+    }
+
+    //Search by amount
+    double avg_search_amount = 0;
+    for(int i = 0;i<5;i++){
+        // Measure the start time
+        auto start = std::chrono::high_resolution_clock::now();
+        const std::string& query = "Bank of Test";
+        auto transactions = api->searchTransactionsByValue(user,100.0);
+        // Measure the end time
+        auto end = std::chrono::high_resolution_clock::now();
+        // Calculate the duration
+        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+        avg_search_amount += duration.count();
+    }
+
+    //Decryption of transactions
+    const std::string& query = "Bank of Test";
+    auto transactions = api->searchTransactionsByBank(user,query);
+    double avg_dec = 0;
+    auto start = std::chrono::high_resolution_clock::now();
+    for(auto t : transactions){        
+        std::string decryptedBank = api->decryptString(user, t.encryptedBankName);
+        std::time_t decryptedTime = std::stoll(api->decryptString(user, t.encryptedDate));
+        std::chrono::system_clock::time_point transactionDate = std::chrono::system_clock::from_time_t(decryptedTime);
+        double decryptedAmount = api->decryptDouble(user, t.encryptedAmount);
+    }  
+    // Measure the end time
+    auto end = std::chrono::high_resolution_clock::now();
+    // Calculate the duration
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+    avg_dec += duration.count();
+
+    double avg_add = 0;
+    start = std::chrono::high_resolution_clock::now();
+    api->getTotalBalance(user);
+    end = std::chrono::high_resolution_clock::now();
+    duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+    avg_add += duration.count();
+
+
+
+    // Output the latency
+    std::cout << "Latency simple encryption: " << avg_encryption/5 << " microseconds" << std::endl;
+    std::cout << "Latency multiplication encryption: " << avg_encryption_mult/5 << " microseconds" << std::endl;
+    std::cout << "Latency search bank : " << avg_search_bank/5 << " microseconds" << std::endl;
+    std::cout << "Latency search amount : " << avg_search_amount/5 << " microseconds" << std::endl;
+    std::cout << "Latency decryption : " << avg_dec/5 << " microseconds" << std::endl;
+    std::cout << "Latency add : " << avg_add/10 << " microseconds" << std::endl;
+
+}
+
+void testSize(){
+    auto api = OpenBankingAPI::Create();
+        
+    helib::SecKey secKey = api->generateSecurityKey();
+    helib::PubKey pk= api->generatePublicKey(secKey);
+    User user(pk, secKey);
+
+    cout << sizeof(pk) << " : pk size\n";
+    cout << sizeof(secKey) << " : sk size\n";
+
+    Bank bank1 = {"Bank of Example"};
+    Bank bank2 = {"Bank of Test"};
+    api->registerBank(user, bank1);
+    api->registerBank(user, bank2);
+
+    auto now = std::chrono::system_clock::now();
+
+    api->deposit(user, "Bank of Example", now, 100.0);  
+
+    cout << sizeof(user.transactions[0]) << " : size of transaction\n";
+}
+
+void testNoiseGrowth(){
+    auto api = OpenBankingAPI::Create();
+        
+    helib::SecKey secKey = api->generateSecurityKey();
+    helib::PubKey pk= api->generatePublicKey(secKey);
+    User user(pk, secKey);
+
+    auto a = api->encryptDouble(user, 34.9);
+    auto b = api->encryptDouble(user, 3.4);
+
+    auto c = a;
+    c *= b;
+    auto d = a;
+    d += b;
+
+    cout << a.errorBound() << " : a\n";
+    cout << b.errorBound()<< " : b\n";
+    cout << c.errorBound()<< " : c\n";
+    cout << d.errorBound()<< " : d\n"; 
+
+    helib::Ctxt total = a;
+    int totalMult = 1;
+    while(total.capacity() > 0){
+        total *= total;
+        totalMult += 1;
+    }
+    cout << totalMult << "mults\n";
+
+}
+
+int main() {
+    
+    testFunctionalities();
+    testLatency();
+    testSize();
+    testNoiseGrowth();
 
     return 0;
 }
